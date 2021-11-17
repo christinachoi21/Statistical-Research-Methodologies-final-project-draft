@@ -1,0 +1,547 @@
+---
+title: 'Data Analysis Report – Draft 3: 36-290 Fall 2021'
+author: "christina choi"
+date: "10/22/2021"
+output:
+  html_document:
+    df_print: paged
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{R, echo=FALSE}
+rm(list=ls())
+file.path = "https://github.com/pefreeman/36-290/raw/master/PROJECT_DATASETS/ACTIVE_CLASS/active_class.Rdata"
+load(url(file.path))
+rm(file.path)
+```
+
+## Classification of Active Galaxies Observed by SDSS
+
+# Introduction
+
+The Sloan Digital Sky Survey has a catalog containing data on over 200 million galaxies. Galaxy data typically include images along with measures of brightness from five different bandpasses (denoted u,g,r,i,and z) spanning the optical regime of the electromagnetic spectrum. These measures of brightness, or magnitudes, can reveal interesting information about galaxies. When a galaxy is *active*--meaning it forms stars at a relatively greater rate or has a supermassive black hole in its center that consumes stars/gas/dust at an enhanced rate--its spectrum will reveal "spikes" called emission lines. These emission lines along with other features from a spectra can be used to make inferences about whether the galaxy is star-forming or whether it has active nucleus.
+
+We will attempt to classify galaxies as either starform or having an active nucleus using features from their spectra with the dataset created by Zhang et al.(2019).
+
+----------------------------------------------------------------------------------------------------------------------------------
+Variables                Description of Variables
+       
+------------------       ---------------------------------------------------------------------------------------------------------
+**sigma_star**           The standard deviation of star velocities in the galaxy
+                       
+  
+**sigma_o3**             The width of the [O III] line
+  
+  
+**u_g, g_r, r_i, i_z**   The four colors of the galaxy. The colors are differences in logarithmic measures of brightness, 
+                         or magnitudes. Magnitudes are highly correlated with each other as well as galaxy distance.
+ 
+ 
+**z**                    Galaxy redshift. Redshift refers to the ratio of the observed wavelength of a photon from an                                       object to its wavelength when it was emitted, minus 1.
+
+
+**O3_Hb**                The relative strength of the [O III] emission line at 500.7 nanometers and the H beta line at                                      486.1 nm. O III refers to an emission line associated with oxygen atoms that are two                                               electrons short of a full set of electrons
+  
+  
+**O2_Hb**                The relative strength of the [O II] emission line at 372.6 nanometers and the H beta line at                                       372.9 nm. O II refers to an emission line associated with oxygen atoms that are one electron                                       short of a full set of electrons
+  
+**label**                The factor response variable in this dataset, that indicates whether a given galaxy is                                             observed to be star-forming (denoted "STARFORM") or with active nuclei (denoted "AGN").
+-----------------------------------------------------------------------------------------------------------------------------------
+
+Table: There are a total of nine predictor variables used in this investigation, with one predictor variable:
+
+# Data
+
+```{r echo=FALSE}
+suppressMessages(library(magrittr))
+suppressMessages(library(dplyr))
+suppressMessages(library(ggplot2))
+suppressMessages(library(GGally))
+suppressMessages(library(corrplot))
+suppressMessages(library(tidyr))
+suppressMessages(library(bestglm))
+suppressMessages(library(glmnet))
+suppressMessages(library(tidyverse))
+suppressMessages(library(pROC))
+suppressMessages(library(e1071))
+suppressMessages(library(rpart))
+suppressMessages(library(randomForest))
+suppressMessages(library(FNN))
+suppressMessages(library(xgboost))
+```
+
+
+The variable `df` is a data frame with 28820 rows and ten columns that contains information on 28820 different galaxies. The last column of the data frame named `label` contains the response variable, which labels each galaxy as either star-forming (denoted "STARFORM") or with active nuclei (denoted "AGN").
+
+The response classes are not perfectly balanced, as there are 15521 STARFORM and 13299 AGN observations. STARFORM galaxies make up roughly 53.9% of the dataset, while AGN galaxies make up roughly 46.1% of the data.
+
+The following histograms visualize the distribution of the nine predictor variables mentioned above. 
+
+There are several outliers present in the data. In order to get rid of the irregularities in the data, the rows for which g-r is exactly 0 has been filtered out. A similar process was used to correct the spikes in the data for sigma_star at 0 (which potentially indicates unmeasured values) and above 2.9. Below shows the distribution of the variables after the data has been filtered.
+
+```{r}
+df<- df %>% filter(., g_r!= 0, sigma_star!= 0, sigma_star<2.9)
+```
+
+```{r}
+df.gathered <- df %>% select(.,u_g,g_r,r_i,i_z,O3_Hb,O2_Hb,sigma_o3,sigma_star,z) %>% gather(.)
+ggplot(data=df.gathered,mapping=aes(x=value)) + geom_histogram(color="blue",fill="yellow",bins=60) + 
+  facet_wrap(~key, scales='free_x')
+```
+
+After being filtered,`df` now has 21159 rows and ten columns. There are now 9873 STARFORM galaxies (which make up roughly 46.7% of the total data), and 11286 AGN galaxies (which make up roughly 53.3% of the total data).
+
+Below is a summary of the dataset that we will be working with, and a list of the names of the nine predictor variables. Missing data has been filtered out, as mentioned above. 
+
+
+```{r}
+summary(df)
+```
+Looking at some of the boxplots that display the distribution of the different variables as well as their respective labels, there does seem to be a visual association between the predictors and the classes "AGN" and "STARFORM". 
+
+For example, taking a look at the color predictor variables, the galaxies labeled as AGN tend to have greater median magnitudes compared to those labeled as STARFORM. 
+
+
+```{r}
+df.facet = df %>% dplyr::select(.,-label) %>% gather(.)
+ggplot(data=df.facet,mapping=aes(y=value,x=rep(df$label,9))) + geom_boxplot(fill="lightblue") + facet_wrap(~key,scales='free_y')
+```
+
+Next, we want to look at the correlation between some of the variables.
+
+```{r}
+df %>% dplyr::select(.,u_g, g_r,r_i, i_z,O3_Hb,O2_Hb,sigma_o3,sigma_star,z) %>% cor(.) %>% corrplot(.,method="number")
+```
+
+It seems like most of the color variables are moderately if not strongly correlated to each other. O2_Hb and O3_Hb have fair correlation, along with Sigma_O3 and O3_Hb. Generally, the correlation coefficients seem to be at least above 0.3, indicating some level of correlation between most if not all the variables.
+
+
+
+# Principal Component Analysis
+
+After we have filtered out the missing values, looked at the correlation between the predictors, and visualized the different distributions of the variables, we will be using Principal Component Analysis, or PCA. 
+
+PCA is a method often used to reduce the dimensionality of large data sets that contain correlated variables. This is done through reducing the set to a smaller set with less variables that are still able to collectively explain most of the variability in the original, larger set.
+
+In this case, since we are interested in prediction (not inference) we will be mainly using PCA to see if the data lay in a lower-dimensional space.
+
+We now perform principal components analysis using a dataset with only the predictor variables. We also make sure to scale the variables so that they are standardized.
+
+
+```{r}
+df.no.lab = subset(df, select = -label)
+pca.out = prcomp(df.no.lab, scale=TRUE, retx = TRUE, center = TRUE, tol = NULL)
+
+v = pca.out$sdev^2
+pve = v/sum(v)
+cpve = round(cumsum(v/sum(v)),3)
+cpve
+
+
+pr_var = data.frame(varExplained = pca.out$sdev^2)
+pr_var = pr_var %>% mutate(pve = varExplained / sum(varExplained))
+
+```
+
+We can see that the first principal component explains 38.1% of the variance in the data, the next PC explains 58.1% of the variance, and so on and so forth. We plot the cumulative PVE as follows:
+
+```{r}
+ggplot(pr_var, aes(as.numeric(row.names(pr_var)), cumsum(pve))) +
+  geom_point() + geom_line()+ geom_hline(yintercept=.95, linetype="dashed", color="grey", size=.6) +
+  xlab("Principal Component") +
+  ylab("Cumulative Proportion of Variance Explained")
+```
+
+Looking at the plot of the cumulative proportion of variance explained,it seems that around 7 PCs should be retained. If we were to adopt 7 PCs, we would be able to drop the last two principal components, which we can assume represents the random variation in the data, and still be able to reconstruct the input data with 97.4% of the overall variance "explained". Although PCA would provide some level of reduced dimensionality, it doesn't seem like it would change too much.
+
+
+
+# Logistic Regression
+
+Now we move onto logistic regression, using a 70-30 data split for the training and testing sets.
+
+```{r}
+
+predictors = df.no.lab
+response   = df$label
+
+#split data, logistic regression model learned on split data with test-set assessment
+set.seed(100)
+fraction=.7
+sp = sample(nrow(predictors), round(fraction*nrow(predictors)))
+pred.train = predictors[sp ,]
+pred.test = predictors[-sp ,]
+resp.train = response[sp]
+resp.test = response[-sp]
+
+
+#logistic regression model using training data
+glm.fit = glm(resp.train~.,data=pred.train,family="binomial")
+summary(glm.fit)
+glm.prob=predict(glm.fit,newdata=pred.test,type="response")
+
+#starform =0, AGN = 1
+contrasts(df$label)
+
+
+#class predictions based on whether the predicted probability of AGN is greater than or less than 0.5:
+glm.pred = rep(NA,length(glm.prob))
+for ( ii in 1:length(glm.prob)) {
+  if (glm.prob[ii] > 0.5) {
+    glm.pred[ii] = "AGN"
+  } else {
+    glm.pred[ii] = "STARFORM"
+  }
+}
+
+#confusion matrix to describe the performance of our classification model 
+tab = table(glm.pred,resp.test)
+tab
+
+mean(glm.pred == resp.test)
+#99.25% correctly predicted 
+
+glm.mcr= mean(glm.pred != resp.test)
+glm.mcr
+#misclassification rate of .740%
+
+#diagnostic plot
+#ggplot(data=data.frame("x"=resp.test,"y"=glm.prob),mapping=aes(x=x,y=y)) +
+  #geom_point(size=0.1,color="saddlebrown") + xlim(0,2) + ylim(0,2) + 
+  #geom_abline(intercept=0,slope=1,color="red")
+
+```
+
+After we create a vector of class predictions based on whether the predicted probability of galaxies labeled as "AGN" is greater than or less than 0.5, we can see how well our classification model performed through the confusion matrix.
+
+It appears that a total of 6301 galaxies were correctly predicted out of a total of 6348, which means roughly 99.25% were correctly predicted with a misclassification rate of .740%.
+
+
+Below we calculate the VIF values of each variable in the model to assess whether or not there is any multicollinearity. It appears that g_r and r_i in particular have VIF values greater than 5, and it seems that there is some presence of multicollinearity but not too much. This is consistent with the results from PCA, where some level of dimensionality could be dropped but not by a lot. Since our objective is prediction, we are not removing variables with high VIF.
+```{r}
+car::vif(glm.fit)
+```
+
+# Best Subset Selection 
+```{r, warning=FALSE}
+df.train = cbind(pred.train,resp.train)
+df.test = cbind(pred.test,resp.test)
+
+
+names(df.train)[names(df.train) == "resp.train"] <- "y"
+names(df.test)[names(df.test) == "resp.test"] <- "y"
+
+
+bg.outBIC = bestglm(df.train,family=binomial, IC="BIC")
+
+bg.outAIC= bestglm(df.train,family=binomial, IC="AIC")
+
+suppressWarnings()
+```
+
+```{r}
+bg.outBIC$BestModel
+
+bg.outAIC$BestModel
+```
+
+For the BIC model, we retain five of the nine predictor variables, dropping variables z, u_g, r_i, i_z.
+For the AIC model, we retain six of the nine predictor variables, dropping i_z, r_i, and g_r
+
+```{r}
+AIC.resp.prob = predict(bg.outAIC$BestModel, newdata=df.test, type="response")
+
+AIC.resp.pred = ifelse(AIC.resp.prob>0.5,"AGN", "STARFORM")
+
+
+mcr.AIC = mean(AIC.resp.pred!=resp.test)
+mcr.AIC
+#AIC misclassification rate is .693%
+
+mean(AIC.resp.pred==resp.test)
+
+table(AIC.resp.pred, resp.test)
+
+```
+
+
+
+# Lasso and Ridge Regression
+
+We attempted to see if lasso and ridge regression was able to be used in this case. 
+
+```{r}
+#lasso
+x = model.matrix(resp.train~.,pred.train)[,-1] ; y = resp.train
+out.lasso = glmnet(x,y,alpha=1,family = "binomial") 
+
+set.seed(100)
+cv.lasso = cv.glmnet(x,y,alpha=1,family = "binomial")
+
+cv.lasso$lambda.min ; log(cv.lasso$lambda.min)
+#5.132038e-05, -9.877423
+
+coef(out.lasso, cv.lasso$lambda.min)
+
+```
+For lasso regression, given optimal value of lambda as 5.132038e-05, all nine variables were retained, suggesting that lasso regression did not lead to improved results.
+
+
+```{r}
+#ridge regresssion
+out.ridge = glmnet(x,y,alpha=0,family = "binomial") 
+
+set.seed(100)
+cv.ridge = cv.glmnet(x,y,alpha=0,family = "binomial")
+
+cv.ridge$lambda.min ; log(cv.ridge$lambda.min)
+#0.04260708, -3.155735
+
+coef(out.ridge, cv.ridge$lambda.min)
+```
+
+For ridge regression, given optimal value of lambda as 0.04260708, all nine variables were retained, suggesting that ridge regression, similar to lasso regression, did not lead to improved results.
+
+This may have been due to the sample sizes being relatively small compared to the number of predictor variables in our data. 
+
+
+# Machine Learning models
+
+Next, we will be working with various machine learning models (trees, RF, XGB, Naive Bayes, SVM) as well as KNN.
+## Trees
+```{r}
+rpart.out =rpart(resp.train~.,data=pred.train)
+tree.class.prob= predict(rpart.out,newdata=pred.test, type="prob")[,2] #prob of class 1
+roc.tree = roc(resp.test,tree.class.prob)
+plot(roc.tree,col="red",xlim=c(1,0),ylim=c(0,1))
+cat("AUC for tree: ",roc.tree$auc,"\n")
+#AUC for tree:  0.9847113 
+
+
+#mean(tree.class.prob!=resp.test)
+#MCR:0.08138352
+
+```
+
+## Random Forest
+
+```{r}
+set.seed(100)
+rf.out = randomForest(resp.train~.,data=pred.train,importance=TRUE)
+resp.prob.rf = predict(rf.out,newdata=pred.test,type="prob")[,2]
+roc.rf = roc(resp.test,resp.prob.rf)
+plot(roc.rf,col="red",xlim=c(1,0),ylim=c(0,1))
+cat("AUC for random forest: ",roc.rf$auc,"\n")
+
+#AUC for random forest:  0.9999623  
+#mean(resp.prob.rf!=resp.test)
+
+```
+
+
+## XGB
+Since `xgboost` wants integer class labels, we map "STARFORM" to 0 and "AGN" to 1.
+
+
+```{r}
+w = which(response!="STARFORM")
+response.new = rep(0,length(response))
+response.new[w] = 1
+response.int = response.new
+
+set.seed(100)
+fraction=.7
+sp = sample(nrow(predictors), round(fraction*nrow(predictors)))
+pred.train = predictors[sp ,]
+pred.test = predictors[-sp ,]
+resp.train.int = response.int[sp]
+resp.test.int = response.int[-sp]
+
+
+train = xgb.DMatrix(data=as.matrix(pred.train),label=resp.train.int)
+test = xgb.DMatrix(data=as.matrix(pred.test),label=resp.test.int)
+
+set.seed(101)
+xgb.cv.out = xgb.cv(params=list(objective="binary:logistic"),train,nrounds=30,nfold=5,verbose=0,eval_metric="error") 
+cat("The optimal number of trees is", which.min(xgb.cv.out$evaluation_log$test_error_mean))
+
+#optimal number of trees is 28
+
+xgb.out = xgboost(train,nrounds=which.min(xgb.cv.out$evaluation_log$test_error_mean),params=list(objective="binary:logistic"),verbose=0,eval_metric="error")
+
+resp.predxg = predict(xgb.out,newdata=test,probability=TRUE)
+
+roc.xgb = roc(resp.test,resp.predxg)
+
+
+plot(roc.xgb,col="red",xlim=c(1,0),ylim=c(0,1))
+cat("AUC for xgb: ",roc.xgb$auc,"\n")
+#AUC for xgb:  0.99997 
+
+```
+
+
+
+## Naive Bayes
+```{r}
+nb.out = naiveBayes(resp.train~.,data=pred.train)
+nb.prob = predict(nb.out,newdata=pred.test,type="raw")[,2]
+roc.nb = roc(resp.test,nb.prob)
+plot(roc.nb,col="red",xlim=c(1,0),ylim=c(0,1))
+cat("AUC for naive bayes: ",roc.nb$auc,"\n")
+
+#AUC for naive bayes:  0.9934819 
+
+```
+
+## KNN
+```{r}
+
+k.max = 20
+mse.k = rep(NA,k.max) 
+for ( kk in 1:k.max ) {
+  knn.out = knn.cv(train=pred.train,cl=resp.train,k=kk,algorithm="brute")
+  mse.k[kk] = mean(knn.out != resp.train)
+}
+k.min = which.min(mse.k)
+cat("The optimal number of nearest neighbors is ",k.min,"\n")
+
+#optimal number of nearest neighbors is 5
+
+knn.out = knn(train=pred.train,test=pred.test,cl=resp.train,k=k.min,prob=TRUE, algorithm="brute")
+knn.prob = attributes(knn.out)$prob
+w = which(knn.out=="STARFORM") # insert name of Class 0 here
+knn.prob[w] = 1 - knn.prob[w]   # knn.prob is now the Class 1 probability!
+
+roc.knn = roc(resp.test,knn.prob)
+plot(roc.knn,col="red",xlim=c(1,0),ylim=c(0,1))
+cat("AUC for knn: ",roc.knn$auc,"\n")
+
+#AUC for knn:  0.9941899 
+
+```
+
+## SVM
+```{r}
+#FIX THISSSS
+
+set.seed(100)
+fraction=.7
+
+predictors = scale(predictors)
+predictors = data.frame(predictors)
+
+sp = sample(nrow(predictors), round(fraction*nrow(predictors)))
+pred.train = predictors[sp ,]
+pred.test = predictors[-sp ,]
+resp.train = response[sp]
+resp.test = response[-sp]
+
+df.train = cbind(pred.train,resp.train)
+df.test = cbind(pred.test,resp.test)
+
+set.seed(202)
+tune.out = tune(svm,resp.train~.,data=df.train,kernel="linear",ranges=list(cost=10^seq(-2,2,by=0.2)), probability=TRUE)
+cat("The estimated optimal value for C is ",as.numeric(tune.out$best.parameters),"\n")
+
+resp.pred.svm = predict(tune.out$best.model,newdata=df.test, probability=TRUE) 
+
+resp.pred.svm[,2]
+
+
+
+(svc.mcr = mean(resp.pred!=resp.test))
+table(resp.pred,resp.test)
+
+
+#The estimated optimal value for C is  63.09573 
+
+```
+
+
+
+
+```
+roc.glm = roc(resp.test, log.prob)
+plot(roc.glm,col="red")
+
+roc.tree = roc(resp.test, class.prob)
+plot(roc.tree,col="blue", add= TRUE)  
+
+roc.rf = roc(resp.test, resp.prob.rf)
+plot(roc.rf, col="pink", add=TRUE)
+
+roc.nb = roc(resp.test, nb.prob)
+plot(roc.rf, col="lightgrey", add=TRUE)
+
+
+cat("AUC for random forest:",roc.rf$auc, "\n")
+cat("AUC for naive bayes:",roc.nb$auc, "\n")
+cat("AUC for tree:",roc.tree$auc, "\n")
+cat("AUC for logistic regression:",roc.glm$auc, "\n")
+
+
+J = roc.rf$sensitivities + roc.rf$specificities - 1
+
+w = which.max(J)
+cat("Optimum threshold for random forest: ",roc.rf$thresholds[w],"\n")
+#0.543
+#data does not have balanced classes but optimal threshold seems like it's close to .5, is this normal?
+
+
+set.seed(100)
+rf.out = randomForest(resp.train~.,data=pred.train,importance=TRUE)
+new.resp.prob.rf = predict(rf.out,newdata=pred.test,type="response",cutoff=c(1-0.543,0.543))
+table(resp.prob.rf,resp.test)
+
+mean(new.resp.prob.rf!=resp.test)
+#MCR:0.04679552
+
+```
+
+
+
+
+----------------------------------------------------------------------------------------------------------------------------------
+Model                     AUC
+       
+------------------       ---------------------------------------------------------------------------------------------------------
+
+
+
+
+
+
+
+-----------------------------------------------------------------------------------------------------------------------------------
+
+
+
+
+
+
+
+
+# References 
+
+```
+
+Freeman, P.E. 2021, online at https://github.com/pefreeman/36-290/blob/master/PROJECT_DATASETS/ACTIVE_CLASS/README.md 
+
+
+James, G., et al. 2013, An Introduction to Statistical Learning, Springer
+
+
+Zhang, K., et al. 2019, "Machine Learning Classifiers for Intermediate Redshift Emission Line Galaxies", The Astrophysical Journal, online at arxiv.org/pdf/1908.07046.pdf
+
+
+Grolemund, Hadley Wickham and Garrett. “7 Exploratory Data Analysis | R for Data Science”, online at https://r4ds.had.co.nz/exploratory-data-analysis.html
+
+
+```
+
+
+
